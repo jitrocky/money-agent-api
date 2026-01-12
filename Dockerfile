@@ -15,6 +15,8 @@ COPY . .
 
 # Cloud Run 会通过环境变量 PORT 指定端口
 ENV NODE_ENV=production
+EXPOSE 8080
 
 # 启动
 CMD ["npm", "start"]
+
