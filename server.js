@@ -117,3 +117,46 @@ const port = process.env.PORT || 8787;
 app.listen(port, () => {
   console.log(`Agent API listening on port ${port}`);
 });
+
+// server.js 里：import 下面加上（Node18+ 自带 fetch，如无则 npm i undici）
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const WORKFLOW_ID = "wf_69650f15f0208190b79a63c7da3f51010f0eefa8f6a01396";
+
+// 可选：给 WP 调用加一个简单的共享密钥，防止别人盗用你接口
+const WP_SHARED_TOKEN = process.env.WP_SHARED_TOKEN; // 自己设一个随机串
+
+app.post("/api/chatkit/session", async (req, res) => {
+  try {
+    if (!OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY missing" });
+
+    // 可选防盗用：WP 请求必须带这个 header
+    if (WP_SHARED_TOKEN) {
+      const token = req.header("X-WP-Token");
+      if (token !== WP_SHARED_TOKEN) return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // user 字段建议传一个稳定的匿名 id（比如设备 id / wp 用户 id / cookie id）
+    const user = String(req.body?.user ?? "anon");
+
+    const r = await fetch("https://api.openai.com/v1/chatkit/sessions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "chatkit_beta=v1",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        workflow: { id: WORKFLOW_ID },
+        user,
+      }),
+    });
+
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data?.error ?? data });
+
+    // 返回 client_secret 给前端（短时有效，适合放浏览器）
+    return res.json({ client_secret: data.client_secret });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message ?? "server error" });
+  }
+});
