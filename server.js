@@ -20,16 +20,36 @@ app.get("/", (req, res) => res.status(200).send("ok"));
 
 app.post("/api/chatkit/session", async (req, res) => {
   try {
-    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY missing" });
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const WORKFLOW_ID = process.env.WORKFLOW_ID;
+
+    if (!OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY missing" });
     if (!WORKFLOW_ID) return res.status(500).json({ error: "WORKFLOW_ID missing" });
 
     const user = String(req.body?.user ?? "wp-anon");
 
-    // 注意：这里用 beta chatkit sessions（你必须确保 SDK 版本支持）
-    const session = await client.beta.chatkit.sessions.create({
-      user,
-      workflow: { id: WORKFLOW_ID },
+    const r = await fetch("https://api.openai.com/v1/chatkit/sessions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "chatkit_beta=v1"
+      },
+      body: JSON.stringify({
+        workflow: { id: WORKFLOW_ID },
+        user
+      })
     });
+
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data?.error ?? data });
+
+    return res.json({ client_secret: data.client_secret });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e?.message ?? "server error" });
+  }
+});
 
     return res.json({ client_secret: session.client_secret });
   } catch (e) {
@@ -43,3 +63,4 @@ const port = Number(process.env.PORT || 8080);
 app.listen(port, "0.0.0.0", () => {
   console.log("Listening on", port);
 });
+
