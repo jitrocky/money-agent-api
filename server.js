@@ -93,3 +93,43 @@ Guidelines:
 
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`Listening on ${port}`));
+
+import express from "express";
+import cors from "cors";
+import OpenAI from "openai";
+
+const app = express();
+app.use(express.json());
+
+app.use(cors({
+  origin: ["https://aiguide.art", "https://www.aiguide.art"],
+  methods: ["POST"],
+}));
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// 只改这个就能换智能体
+const WORKFLOW_ID = process.env.WORKFLOW_ID; // 例如：wf_69650f15f0208190b79a63c7da3f51010f0eefa8f6a01396
+
+app.post("/api/chatkit/session", async (req, res) => {
+  try {
+    if (!WORKFLOW_ID) return res.status(500).json({ error: "WORKFLOW_ID missing" });
+
+    // user 用来区分不同终端用户，随便给一个稳定的字符串即可
+    const user = String(req.body?.user ?? "wp-anon");
+
+    const session = await client.beta.chatkit.sessions.create({
+      user,
+      workflow: { id: WORKFLOW_ID },
+      // 可选：限制每分钟次数/会话总次数，防止刷爆
+      // rate_limits: { ... } 具体字段以你控制台/SDK为准
+    });
+
+    return res.json({ client_secret: session.client_secret });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message ?? "server error" });
+  }
+});
+
+const port = process.env.PORT || 8080;
+app.listen(port, () => console.log("Listening on", port));
