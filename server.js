@@ -1,159 +1,121 @@
-/**
- * Final server.js for Cloud Run + WordPress ChatKit
- * - Stable: listens on process.env.PORT
- * - Provides ChatKit session endpoint returning client_secret
- * - Optional fallback chat endpoint
- *
- * Required ENV:
- *   OPENAI_API_KEY=sk-...
- *   WORKFLOW_ID=wf_...
- *
- * Optional ENV:
- *   ALLOWED_ORIGINS=https://aiguide.art,https://www.aiguide.art
- *   WP_SHARED_TOKEN=some-long-random-string   (if set, require X-Shared-Token)
- */
-
+// server.js
 import express from "express";
-import cors from "cors";
-import rateLimit from "express-rate-limit";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 
-// ---- Config ----
-const PORT = Number(process.env.PORT || 8080);
-const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "").trim();
-const WORKFLOW_ID = String(process.env.WORKFLOW_ID || "").trim();
+// ============ Config ============
+const PORT = process.env.PORT || 8080;
 
-const ALLOWED_ORIGINS = String(
-  process.env.ALLOWED_ORIGINS || "https://aiguide.art,https://www.aiguide.art"
-)
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+// 必填：OpenAI 的 Secret Key（服务端环境变量）
+// Cloud Run -> Variables & Secrets -> OPENAI_API_KEY
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-const WP_SHARED_TOKEN = String(process.env.WP_SHARED_TOKEN || "").trim();
+// 必填：你的工作流智能体 ID（wf_...）
+// Cloud Run -> Variables & Secrets -> WORKFLOW_ID
+const WORKFLOW_ID = process.env.WORKFLOW_ID;
 
-// ---- Basic health endpoints (so container always starts) ----
-app.get("/", (req, res) => res.status(200).send("ok"));
+// 选填：允许的站点来源（你的 WP 域名），不填就放开（不推荐）
+// 例：https://aiguide.art
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    has_openai_key: Boolean(OPENAI_API_KEY),
-    workflow_id_set: Boolean(WORKFLOW_ID),
-    port: PORT,
-  });
-});
-
-// ---- CORS (WP only) ----
-app.use(
-  cors({
-    origin: function (origin, cb) {
-      // allow non-browser calls (curl/no origin)
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked"));
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-Shared-Token"],
-  })
-);
-
-// ---- Optional shared token protection (recommended) ----
-function requireSharedToken(req, res, next) {
-  if (!WP_SHARED_TOKEN) return next(); // not enabled
-  const incoming = String(req.header("X-Shared-Token") || "");
-  if (incoming && incoming === WP_SHARED_TOKEN) return next();
-  return res.status(401).json({ error: "Unauthorized" });
+// ============ Basic checks ============
+if (!OPENAI_API_KEY) {
+  console.error("Missing env: OPENAI_API_KEY");
+}
+if (!WORKFLOW_ID) {
+  console.error("Missing env: WORKFLOW_ID");
 }
 
-// ---- Rate limit (protect your bill) ----
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30, // 30 requests/min per IP
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// ============ CORS ============
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
 
-// ============================================================
-// 1) ChatKit: create session -> return client_secret to frontend
-// ============================================================
-app.post(
-  "/api/chatkit/session",
-  limiter,
-  requireSharedToken,
-  async (req, res) => {
-    try {
-      if (!OPENAI_API_KEY) {
-        return res.status(500).json({ error: "OPENAI_API_KEY missing" });
-      }
-      if (!WORKFLOW_ID) {
-        return res.status(500).json({ error: "WORKFLOW_ID missing" });
-      }
-
-      // You can pass a user id from WP, or default:
-      const user = String(req.body?.user ?? "wp-anon").slice(0, 200);
-
-      // IMPORTANT:
-      // Do NOT use client.beta.chatkit.sessions (SDK mismatch prone).
-      // Call the REST endpoint directly.
-      const r = await fetch("https://api.openai.com/v1/chatkit/sessions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "chatkit_beta=v1",
-        },
-        body: JSON.stringify({
-          workflow: { id: WORKFLOW_ID },
-          user,
-        }),
-      });
-
-      const data = await r.json();
-      if (!r.ok) {
-        console.error("chatkit session error:", data);
-        return res.status(r.status).json({ error: data?.error ?? data });
-      }
-
-      // Expected: { id, client_secret, ... }
-      return res.json({ client_secret: data.client_secret });
-    } catch (e) {
-      console.error(e);
-      return res.status(500).json({ error: e?.message ?? "server error" });
+  // 如果你设置了 ALLOWED_ORIGIN，就只允许该来源
+  if (ALLOWED_ORIGIN) {
+    if (origin === ALLOWED_ORIGIN) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+    }
+  } else {
+    // 不设置则放开（上线不推荐）
+    if (origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
     }
   }
-);
 
-// ============================================================
-// 2) Optional fallback: simple chat endpoint (not ChatKit UI)
-//    Useful for debugging quickly from curl/Postman.
-// ============================================================
-app.post("/api/chat", limiter, requireSharedToken, async (req, res) => {
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
+
+// ============ Helpers ============
+async function openaiCreateSession({ user }) {
+  // ChatKit sessions endpoint + OpenAI-Beta header
+  // 文档示例就是在服务端请求 /v1/chatkit/sessions，并传 workflow.id 与 user。:contentReference[oaicite:2]{index=2}
+  const resp = await fetch("https://api.openai.com/v1/chatkit/sessions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "chatkit_beta=v1",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      workflow: { id: WORKFLOW_ID },
+      user: user || "wp-anon",
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`OpenAI session create failed: ${resp.status} ${msg}`);
+  }
+  return data; // { client_secret, ... }
+}
+
+// ============ Routes ============
+
+// 健康检查
+app.get("/", (req, res) => res.status(200).send("ok"));
+
+// 启动：给前端一个 client_secret
+app.post("/api/chatkit/start", async (req, res) => {
   try {
-    if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "OPENAI_API_KEY missing" });
-    }
+    if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+    if (!WORKFLOW_ID) return res.status(500).json({ error: "Missing WORKFLOW_ID" });
 
-    const message = String(req.body?.message ?? "").trim();
-    if (!message) return res.status(400).json({ error: "message is required" });
+    const user = req.body?.user || "wp-anon";
+    const session = await openaiCreateSession({ user });
 
-    // If you want this endpoint to also run your workflow,
-    // you should implement OpenAI Responses/Agents call here.
-    // To keep this file minimal & stable, we return a placeholder:
-    return res.json({
-      text:
-        "This /api/chat endpoint is for debugging only. Use ChatKit session + ChatKit UI for your workflow agent.",
-    });
+    return res.json({ client_secret: session.client_secret });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: e?.message ?? "server error" });
+    return res.status(500).json({ error: String(e.message || e) });
   }
 });
 
-// ---- Start server (Cloud Run needs 0.0.0.0) ----
+// 刷新：当前 client_secret 过期时重新发一个
+//（简单做法：直接再创建一个新 session 即可）
+app.post("/api/chatkit/refresh", async (req, res) => {
+  try {
+    if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+    if (!WORKFLOW_ID) return res.status(500).json({ error: "Missing WORKFLOW_ID" });
+
+    const user = req.body?.user || "wp-anon";
+    const session = await openaiCreateSession({ user });
+
+    return res.json({ client_secret: session.client_secret });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("Listening on", PORT);
-  console.log("Allowed origins:", ALLOWED_ORIGINS);
+  console.log(`Listening on :${PORT}`);
 });
